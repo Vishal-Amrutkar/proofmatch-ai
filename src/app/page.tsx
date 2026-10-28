@@ -1,17 +1,31 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import { Navigation } from "../components/Navigation";
 import { DisclaimerBanner } from "../components/DisclaimerBanner";
 import { WorkflowExplanation } from "../components/WorkflowExplanation";
 import { ScreenshotUploadCard } from "../components/ScreenshotUploadCard";
 import { CsvUploadCard } from "../components/CsvUploadCard";
+import { OcrReviewPanel } from "../components/OcrReviewPanel";
 import { CsvParseResult } from "../lib/csvParser";
+import { ExtractedCandidateFields, OcrJobProgress } from "../lib/ocrExtractor";
+import { runClientOcr } from "../lib/tesseractService";
 
 export default function Home() {
   const [screenshotFile, setScreenshotFile] = useState<File | null>(null);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [parsedCsv, setParsedCsv] = useState<CsvParseResult | null>(null);
+
+  // OCR Extraction State
+  const [extractedOcrFields, setExtractedOcrFields] = useState<ExtractedCandidateFields | null>(null);
+  const [editedReference, setEditedReference] = useState("");
+  const [editedAmount, setEditedAmount] = useState("");
+  const [editedDate, setEditedDate] = useState("");
+  const [isOcrRunning, setIsOcrRunning] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState<OcrJobProgress | null>(null);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+
+  const ocrAbortControllerRef = useRef<AbortController | null>(null);
 
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
@@ -21,7 +35,23 @@ export default function Home() {
     text: string;
   } | null>(null);
 
+  const clearOcrState = useCallback(() => {
+    if (ocrAbortControllerRef.current) {
+      ocrAbortControllerRef.current.abort();
+      ocrAbortControllerRef.current = null;
+    }
+    setIsOcrRunning(false);
+    setOcrProgress(null);
+    setOcrError(null);
+    setExtractedOcrFields(null);
+    setEditedReference("");
+    setEditedAmount("");
+    setEditedDate("");
+  }, []);
+
   const handleScreenshotChange = (file: File | null) => {
+    // Prevent stale OCR results from previous file
+    clearOcrState();
     setScreenshotFile(file);
     if (globalValidationMessage) setGlobalValidationMessage(null);
   };
@@ -30,6 +60,47 @@ export default function Home() {
     setCsvFile(file);
     if (!file) setParsedCsv(null);
     if (globalValidationMessage) setGlobalValidationMessage(null);
+  };
+
+  const handleRunOcr = async () => {
+    if (!screenshotFile) return;
+
+    if (ocrAbortControllerRef.current) {
+      ocrAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    ocrAbortControllerRef.current = controller;
+
+    setIsOcrRunning(true);
+    setOcrError(null);
+    setOcrProgress({
+      status: "Starting local OCR engine...",
+      progress: 0.05,
+      stage: "init",
+    });
+
+    try {
+      const extracted = await runClientOcr(screenshotFile, {
+        signal: controller.signal,
+        onProgress: (prog) => {
+          setOcrProgress(prog);
+        },
+      });
+
+      if (!controller.signal.aborted) {
+        setIsOcrRunning(false);
+        setExtractedOcrFields(extracted);
+        setEditedReference(extracted.reference);
+        setEditedAmount(extracted.amount);
+        setEditedDate(extracted.date);
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setIsOcrRunning(false);
+        const msg = err instanceof Error ? err.message : String(err);
+        setOcrError(msg);
+      }
+    }
   };
 
   const handleAnalyzeClick = (e: React.FormEvent) => {
@@ -73,15 +144,44 @@ export default function Home() {
       return;
     }
 
-    // Both files are present and valid
+    // Check if OCR has been run or fields reviewed
+    if (!extractedOcrFields && !editedReference && !editedAmount) {
+      setGlobalValidationMessage({
+        type: "error",
+        title: "Screenshot Details Needed",
+        text: "Please click 'Extract Payment Details' above to extract and verify the transaction reference and amount from the screenshot.",
+      });
+      return;
+    }
+
+    if (!editedReference.trim()) {
+      setGlobalValidationMessage({
+        type: "error",
+        title: "Transaction Reference Required",
+        text: "Please review and enter the transaction reference (UTR / ID) from the screenshot.",
+      });
+      return;
+    }
+
+    if (!editedAmount.trim()) {
+      setGlobalValidationMessage({
+        type: "error",
+        title: "Payment Amount Required",
+        text: "Please review and enter the payment amount from the screenshot.",
+      });
+      return;
+    }
+
+    // Both files and candidate fields are present and valid
     setGlobalValidationMessage({
       type: "info",
-      title: "Phase 2 Validation Succeeded",
-      text: `Successfully validated screenshot "${screenshotFile.name}" and parsed ${parsedCsv.totalRows} records from "${csvFile.name}". In Phase 3, local in-browser OCR (Tesseract.js) will extract screenshot text for deterministic matching.`,
+      title: "Phase 3 Ready: Extracted Candidate Values Validated",
+      text: `Reference "${editedReference.trim()}" and Amount "₹${editedAmount.trim()}" ready to compare against ${parsedCsv.totalRows} CSV records. In Phase 4, deterministic matching rules will execute.`,
     });
   };
 
   const handleReset = () => {
+    clearOcrState();
     setScreenshotFile(null);
     setCsvFile(null);
     setParsedCsv(null);
@@ -90,7 +190,13 @@ export default function Home() {
     setGlobalValidationMessage(null);
   };
 
-  const isReady = Boolean(screenshotFile && csvFile && parsedCsv?.isValid);
+  const isReady = Boolean(
+    screenshotFile &&
+      csvFile &&
+      parsedCsv?.isValid &&
+      editedReference.trim() &&
+      editedAmount.trim()
+  );
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
@@ -134,6 +240,22 @@ export default function Home() {
               onParsedResultChange={setParsedCsv}
             />
           </div>
+
+          {/* OCR Review and Field Correction Panel (Phase 3) */}
+          <OcrReviewPanel
+            file={screenshotFile}
+            extractedFields={extractedOcrFields}
+            editedReference={editedReference}
+            editedAmount={editedAmount}
+            editedDate={editedDate}
+            onReferenceChange={setEditedReference}
+            onAmountChange={setEditedAmount}
+            onDateChange={setEditedDate}
+            isOcrRunning={isOcrRunning}
+            ocrProgress={ocrProgress}
+            ocrError={ocrError}
+            onRunOcr={handleRunOcr}
+          />
 
           {/* Validation Feedback Banner */}
           {globalValidationMessage && (
@@ -197,11 +319,11 @@ export default function Home() {
               {isReady ? (
                 <span className="text-emerald-800 font-semibold flex items-center gap-1.5 justify-center sm:justify-start">
                   <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block"></span>
-                  Screenshot and {parsedCsv?.totalRows} CSV records ready.
+                  Verified candidate fields and {parsedCsv?.totalRows} CSV records ready.
                 </span>
               ) : (
                 <span>
-                  Upload screenshot and valid CSV to proceed to reconciliation.
+                  Attach screenshot, run OCR review, and provide valid CSV to reconcile.
                 </span>
               )}
             </div>
