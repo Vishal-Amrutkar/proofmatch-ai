@@ -13,11 +13,12 @@ if (!fs.existsSync(distDir)) {
 }
 
 execSync(
-  `npx tsc --outDir "${distDir}" --module commonjs --target es2020 --moduleResolution node --esModuleInterop src/lib/ocrExtractor.ts src/lib/csvParser.ts`,
+  `npx tsc --outDir "${distDir}" --module commonjs --target es2020 --moduleResolution node --esModuleInterop src/lib/ocrExtractor.ts src/lib/csvParser.ts src/lib/matcher.ts`,
   { stdio: "inherit" }
 );
 
 const { extractCandidateFields } = require(path.join(distDir, "ocrExtractor.js"));
+const { reconcileScreenshotWithCsv } = require(path.join(distDir, "matcher.js"));
 
 console.log("\n=======================================================");
 console.log("RUNNING OCR EXTRACTION REGRESSION TEST SUITE");
@@ -180,6 +181,129 @@ Date: 28 Oct 2026`;
   const res = extractCandidateFields(text);
   assert.strictEqual(res.amount, "");
   assert.strictEqual(res.amountConfidence, "missing");
+});
+
+// 8. Deterministic Matching Engine Tests
+const SAMPLE_CSV_TRANSACTIONS = [
+  {
+    id: "tx-1",
+    rawReference: "ABC123456789",
+    normalizedReference: "ABC123456789",
+    rawAmount: "499.00",
+    amountPaise: 49900,
+    formattedAmount: "499.00",
+    date: "2026-10-28",
+    status: "Completed",
+    rowNumber: 2,
+    rawRow: {},
+  },
+  {
+    id: "tx-2",
+    rawReference: "XYZ987654321",
+    normalizedReference: "XYZ987654321",
+    rawAmount: "250.00",
+    amountPaise: 25000,
+    formattedAmount: "250.00",
+    date: "2026-10-28",
+    status: "Completed",
+    rowNumber: 3,
+    rawRow: {},
+  },
+  {
+    id: "tx-3",
+    rawReference: "DUPREF112233",
+    normalizedReference: "DUPREF112233",
+    rawAmount: "120.00",
+    amountPaise: 12000,
+    formattedAmount: "120.00",
+    date: "2026-10-25",
+    status: "Completed",
+    rowNumber: 4,
+    rawRow: {},
+  },
+  {
+    id: "tx-4",
+    rawReference: "DUPREF112233",
+    normalizedReference: "DUPREF112233",
+    rawAmount: "120.00",
+    amountPaise: 12000,
+    formattedAmount: "120.00",
+    date: "2026-10-25",
+    status: "Completed",
+    rowNumber: 5,
+    rawRow: {},
+  },
+  {
+    id: "tx-5",
+    rawReference: "MISMATCHREF99",
+    normalizedReference: "MISMATCHREF99",
+    rawAmount: "800.00",
+    amountPaise: 80000,
+    formattedAmount: "800.00",
+    date: "2026-10-24",
+    status: "Completed",
+    rowNumber: 6,
+    rawRow: {},
+  },
+];
+
+runTest("Matcher: MATCHED TO CSV on exact normalized reference and paise", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: " abc-123-456-789 ", amount: "499.00", date: "2026-10-28" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "MATCHED TO CSV");
+  assert.strictEqual(match.statusType, "success");
+  assert.strictEqual(match.matchedTransaction?.rowNumber, 2);
+  assert.strictEqual(match.comparisonDetails.amountMatch, true);
+  assert.strictEqual(match.comparisonDetails.referenceMatch, true);
+});
+
+runTest("Matcher: MATCHED TO CSV flags date differences", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: "ABC123456789", amount: "499.00", date: "2026-10-29" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "MATCHED TO CSV");
+  assert.ok(match.dateMismatchNote?.includes("Date difference flagged"));
+});
+
+runTest("Matcher: AMOUNT MISMATCH when reference matches but amount differs", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: "MISMATCHREF99", amount: "500.00" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "AMOUNT MISMATCH");
+  assert.strictEqual(match.statusType, "warning");
+  assert.strictEqual(match.matchedTransaction?.rowNumber, 6);
+});
+
+runTest("Matcher: DUPLICATE REFERENCE when multiple CSV rows share reference", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: "DUPREF112233", amount: "120.00" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "DUPLICATE REFERENCE");
+  assert.strictEqual(match.statusType, "warning");
+  assert.strictEqual(match.candidateTransactions.length, 2);
+});
+
+runTest("Matcher: REFERENCE NOT FOUND when reference does not exist in CSV", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: "NOTEXIST12345", amount: "999.00" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "REFERENCE NOT FOUND");
+  assert.strictEqual(match.statusType, "error");
+});
+
+runTest("Matcher: OCR NEEDS REVIEW when required inputs are empty or invalid", () => {
+  const match = reconcileScreenshotWithCsv(
+    { reference: "", amount: "invalid" },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "OCR NEEDS REVIEW");
+  assert.strictEqual(match.statusType, "warning");
 });
 
 console.log(`\n=======================================================`);

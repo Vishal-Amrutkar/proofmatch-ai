@@ -7,9 +7,11 @@ import { WorkflowExplanation } from "../components/WorkflowExplanation";
 import { ScreenshotUploadCard } from "../components/ScreenshotUploadCard";
 import { CsvUploadCard } from "../components/CsvUploadCard";
 import { OcrReviewPanel } from "../components/OcrReviewPanel";
+import { ReconciliationResultCard } from "../components/ReconciliationResultCard";
 import { CsvParseResult } from "../lib/csvParser";
 import { ExtractedCandidateFields, OcrJobProgress } from "../lib/ocrExtractor";
 import { runClientOcr } from "../lib/tesseractService";
+import { reconcileScreenshotWithCsv, MatchResult } from "../lib/matcher";
 
 export default function Home() {
   const [screenshotFile, setScreenshotFile] = useState<File | null>(null);
@@ -26,6 +28,8 @@ export default function Home() {
   const [ocrError, setOcrError] = useState<string | null>(null);
 
   const ocrAbortControllerRef = useRef<AbortController | null>(null);
+
+  const [reconciliationResult, setReconciliationResult] = useState<MatchResult | null>(null);
 
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
@@ -54,12 +58,14 @@ export default function Home() {
     clearOcrState();
     setScreenshotFile(file);
     if (globalValidationMessage) setGlobalValidationMessage(null);
+    if (reconciliationResult) setReconciliationResult(null);
   };
 
   const handleCsvChange = (file: File | null) => {
     setCsvFile(file);
     if (!file) setParsedCsv(null);
     if (globalValidationMessage) setGlobalValidationMessage(null);
+    if (reconciliationResult) setReconciliationResult(null);
   };
 
   const handleRunOcr = async () => {
@@ -172,12 +178,20 @@ export default function Home() {
       return;
     }
 
-    // Both files and candidate fields are present and valid
-    setGlobalValidationMessage({
-      type: "info",
-      title: "Phase 3 Ready: Extracted Candidate Values Validated",
-      text: `Reference "${editedReference.trim()}" and Amount "₹${editedAmount.trim()}" ready to compare against ${parsedCsv.totalRows} CSV records. In Phase 4, deterministic matching rules will execute.`,
-    });
+    // Run deterministic reconciliation
+    const match = reconcileScreenshotWithCsv(
+      {
+        reference: editedReference.trim(),
+        amount: editedAmount.trim(),
+        date: editedDate.trim() || undefined,
+        referenceConfidence: extractedOcrFields?.referenceConfidence,
+        amountConfidence: extractedOcrFields?.amountConfidence,
+      },
+      parsedCsv.transactions
+    );
+
+    setReconciliationResult(match);
+    setGlobalValidationMessage(null);
   };
 
   const handleReset = () => {
@@ -188,6 +202,7 @@ export default function Home() {
     setScreenshotError(null);
     setCsvError(null);
     setGlobalValidationMessage(null);
+    setReconciliationResult(null);
   };
 
   const isReady = Boolean(
@@ -329,7 +344,7 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3 w-full sm:w-auto">
-              {(screenshotFile || csvFile || globalValidationMessage) && (
+              {(screenshotFile || csvFile || globalValidationMessage || reconciliationResult) && (
                 <button
                   type="button"
                   onClick={handleReset}
@@ -360,6 +375,16 @@ export default function Home() {
             </div>
           </div>
         </form>
+
+        {/* Reconciliation Result Panel (Phases 4 & 5) */}
+        {reconciliationResult && (
+          <section id="reconciliation-result" aria-label="Reconciliation Result">
+            <ReconciliationResultCard
+              result={reconciliationResult}
+              onReset={handleReset}
+            />
+          </section>
+        )}
       </main>
 
       {/* Footer */}
