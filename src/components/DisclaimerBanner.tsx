@@ -2,15 +2,19 @@ import React from "react";
 
 export function DisclaimerBanner() {
   return (
-    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 sm:p-5 text-slate-800">
+    <div
+      role="region"
+      aria-label="Important verification notice"
+      className="rounded-xl border border-amber-300/80 bg-amber-50/60 p-4 sm:p-5 text-slate-800 transition-colors"
+    >
       <div className="flex items-start gap-3.5">
-        <div className="flex-shrink-0 mt-0.5 text-amber-600">
+        <div className="flex-shrink-0 mt-0.5 text-amber-700">
           <svg
             className="w-5 h-5"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="2"
+            strokeWidth="2.2"
             strokeLinecap="round"
             strokeLinejoin="round"
             aria-hidden="true"
@@ -21,15 +25,15 @@ export function DisclaimerBanner() {
           </svg>
         </div>
         <div className="space-y-1.5 text-sm">
-          <p className="font-semibold text-amber-950">
-            Important Safety & Verification Notice
+          <p className="font-semibold text-amber-950 tracking-tight">
+            Important Safety &amp; Reconciliation Notice
           </p>
-          <p className="text-amber-900 leading-relaxed">
+          <p className="text-amber-900 leading-relaxed font-normal">
             <strong>This tool compares a screenshot with the CSV you provide. A match is not proof that money reached your account. Confirm the credit in your trusted bank or payment app.</strong>
           </p>
-          <div className="pt-1.5 flex items-center gap-2 text-xs text-amber-800">
+          <div className="pt-1.5 flex items-center gap-2 text-xs text-amber-900/90 font-medium">
             <svg
-              className="w-4 h-4 text-emerald-600 flex-shrink-0"
+              className="w-4 h-4 text-emerald-700 flex-shrink-0"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -42,7 +46,7 @@ export function DisclaimerBanner() {
               <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
             <span>
-              <strong>Privacy guarantee:</strong> File processing and OCR run locally in your browser. No images or financial records are uploaded to any server.
+              <strong>Local Browser Privacy:</strong> OCR and CSV reconciliation run exclusively on your device. Uploaded files are never stored or transmitted to remote servers.
             </span>
           </div>
         </div>

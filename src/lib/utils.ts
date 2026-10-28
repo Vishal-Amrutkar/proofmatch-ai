@@ -31,3 +31,4 @@ export function isValidCsvFile(file: File): boolean {
   }
   return file.name.toLowerCase().endsWith(".csv");
 }
+
