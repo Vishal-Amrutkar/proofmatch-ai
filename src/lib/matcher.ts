@@ -118,27 +118,90 @@ export function reconcileScreenshotWithCsv(
     };
   }
 
-  // 2. Ambiguity check: Low confidence reference or unreadable token
-  if (input.referenceConfidence === "missing") {
+  // 2. OCR Confidence Safety Guard:
+  // If essential fields have low confidence or require review, never mark as MATCHED TO CSV.
+  // Return OCR NEEDS REVIEW for low-confidence amount or AMBIGUOUS — REVIEW REQUIRED for low-confidence reference.
+
+  // 2A. Low-confidence amount requires verification
+  if (input.amountConfidence === "low") {
+    const referenceMatches = transactions.filter(
+      (t) => t.normalizedReference === normalizedRef
+    );
+    const amountSuggestions = transactions.filter(
+      (t) => t.amountPaise === screenshotPaise
+    );
+    const candidates = referenceMatches.length > 0 ? referenceMatches : amountSuggestions.slice(0, 5);
+
     return {
-      status: "AMBIGUOUS — REVIEW REQUIRED",
+      status: "OCR NEEDS REVIEW",
       statusType: "warning",
-      headline: "Ambiguous Screenshot Details",
-      reason: "The screenshot transaction reference could not be identified with certainty. Review and correct the candidate fields above.",
+      headline: "Payment Amount Requires Verification",
+      reason: `The payment amount (₹${formatPaise(screenshotPaise)}) was extracted with low confidence (unverified OCR candidate). Review and confirm the amount shown on the screenshot before reconciling.`,
       screenshotReference: rawRef,
       normalizedScreenshotReference: normalizedRef,
       screenshotAmount: formatPaise(screenshotPaise),
       screenshotAmountPaise: screenshotPaise,
       screenshotDate: rawDate || undefined,
-      candidateTransactions: [],
+      candidateTransactions: candidates,
+      matchedTransaction: referenceMatches.length === 1 ? referenceMatches[0] : undefined,
       comparisonDetails: {
-        referenceMatch: false,
+        referenceMatch: referenceMatches.length > 0,
         amountMatch: false,
         screenshot: {
           reference: rawRef,
           amount: formatPaise(screenshotPaise),
           date: rawDate || undefined,
         },
+        csv: referenceMatches.length === 1 ? {
+          reference: referenceMatches[0].rawReference,
+          amount: referenceMatches[0].formattedAmount,
+          date: referenceMatches[0].date,
+          status: referenceMatches[0].status,
+          rowNumber: referenceMatches[0].rowNumber,
+        } : undefined,
+      },
+      timestamp,
+      safetyNotice: SAFETY_DISCLAIMER,
+    };
+  }
+
+  // 2B. Missing or low-confidence reference requires review
+  if (input.referenceConfidence === "missing" || input.referenceConfidence === "low") {
+    const referenceMatches = transactions.filter(
+      (t) => t.normalizedReference === normalizedRef
+    );
+    const amountSuggestions = transactions.filter(
+      (t) => t.amountPaise === screenshotPaise
+    );
+    const candidates = referenceMatches.length > 0 ? referenceMatches : amountSuggestions.slice(0, 5);
+
+    return {
+      status: "AMBIGUOUS — REVIEW REQUIRED",
+      statusType: "warning",
+      headline: "Uncertain Transaction Reference — Review Required",
+      reason: "The transaction reference was extracted with low confidence or uncertainty. Review and confirm the reference ID from the screenshot before reconciling.",
+      screenshotReference: rawRef,
+      normalizedScreenshotReference: normalizedRef,
+      screenshotAmount: formatPaise(screenshotPaise),
+      screenshotAmountPaise: screenshotPaise,
+      screenshotDate: rawDate || undefined,
+      candidateTransactions: candidates,
+      matchedTransaction: referenceMatches.length === 1 ? referenceMatches[0] : undefined,
+      comparisonDetails: {
+        referenceMatch: referenceMatches.length > 0,
+        amountMatch: referenceMatches.length > 0 && referenceMatches[0].amountPaise === screenshotPaise,
+        screenshot: {
+          reference: rawRef,
+          amount: formatPaise(screenshotPaise),
+          date: rawDate || undefined,
+        },
+        csv: referenceMatches.length === 1 ? {
+          reference: referenceMatches[0].rawReference,
+          amount: referenceMatches[0].formattedAmount,
+          date: referenceMatches[0].date,
+          status: referenceMatches[0].status,
+          rowNumber: referenceMatches[0].rowNumber,
+        } : undefined,
       },
       timestamp,
       safetyNotice: SAFETY_DISCLAIMER,

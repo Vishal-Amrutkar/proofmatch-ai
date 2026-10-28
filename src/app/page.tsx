@@ -23,6 +23,8 @@ export default function Home() {
   const [editedReference, setEditedReference] = useState("");
   const [editedAmount, setEditedAmount] = useState("");
   const [editedDate, setEditedDate] = useState("");
+  const [isReferenceUserReviewed, setIsReferenceUserReviewed] = useState(false);
+  const [isAmountUserReviewed, setIsAmountUserReviewed] = useState(false);
   const [isOcrRunning, setIsOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState<OcrJobProgress | null>(null);
   const [ocrError, setOcrError] = useState<string | null>(null);
@@ -51,7 +53,21 @@ export default function Home() {
     setEditedReference("");
     setEditedAmount("");
     setEditedDate("");
+    setIsReferenceUserReviewed(false);
+    setIsAmountUserReviewed(false);
   }, []);
+
+  const handleReferenceChange = (val: string) => {
+    setIsReferenceUserReviewed(true);
+    setEditedReference(val);
+    if (reconciliationResult) setReconciliationResult(null);
+  };
+
+  const handleAmountChange = (val: string) => {
+    setIsAmountUserReviewed(true);
+    setEditedAmount(val);
+    if (reconciliationResult) setReconciliationResult(null);
+  };
 
   const handleScreenshotChange = (file: File | null) => {
     // Prevent stale OCR results from previous file
@@ -99,6 +115,8 @@ export default function Home() {
         setEditedReference(extracted.reference);
         setEditedAmount(extracted.amount);
         setEditedDate(extracted.date);
+        setIsReferenceUserReviewed(false);
+        setIsAmountUserReviewed(false);
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -178,14 +196,25 @@ export default function Home() {
       return;
     }
 
+    // Determine effective confidence: if user has edited/confirmed the field, consider it verified
+    const effectiveRefConfidence =
+      isReferenceUserReviewed || (extractedOcrFields && editedReference.trim() !== extractedOcrFields.reference.trim())
+        ? "high"
+        : extractedOcrFields?.referenceConfidence || "high";
+
+    const effectiveAmountConfidence =
+      isAmountUserReviewed || (extractedOcrFields && editedAmount.trim() !== extractedOcrFields.amount.trim())
+        ? "high"
+        : extractedOcrFields?.amountConfidence || "high";
+
     // Run deterministic reconciliation
     const match = reconcileScreenshotWithCsv(
       {
         reference: editedReference.trim(),
         amount: editedAmount.trim(),
         date: editedDate.trim() || undefined,
-        referenceConfidence: extractedOcrFields?.referenceConfidence,
-        amountConfidence: extractedOcrFields?.amountConfidence,
+        referenceConfidence: effectiveRefConfidence,
+        amountConfidence: effectiveAmountConfidence,
       },
       parsedCsv.transactions
     );
@@ -263,8 +292,8 @@ export default function Home() {
             editedReference={editedReference}
             editedAmount={editedAmount}
             editedDate={editedDate}
-            onReferenceChange={setEditedReference}
-            onAmountChange={setEditedAmount}
+            onReferenceChange={handleReferenceChange}
+            onAmountChange={handleAmountChange}
             onDateChange={setEditedDate}
             isOcrRunning={isOcrRunning}
             ocrProgress={ocrProgress}

@@ -306,6 +306,56 @@ runTest("Matcher: OCR NEEDS REVIEW when required inputs are empty or invalid", (
   assert.strictEqual(match.statusType, "warning");
 });
 
+// 9. OCR Confidence Safety Guard Regression Tests
+runTest("Safety Guard: low-confidence amount blocks MATCHED TO CSV and returns OCR NEEDS REVIEW", () => {
+  // Even though reference and amount match CSV row #2 exactly:
+  const match = reconcileScreenshotWithCsv(
+    {
+      reference: "ABC123456789",
+      amount: "499.00",
+      amountConfidence: "low",
+      referenceConfidence: "high",
+    },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.notStrictEqual(match.status, "MATCHED TO CSV", "Must NEVER return MATCHED TO CSV when amount is low confidence");
+  assert.strictEqual(match.status, "OCR NEEDS REVIEW");
+  assert.strictEqual(match.statusType, "warning");
+  assert.ok(match.reason.includes("low confidence"), "Reason must mention low confidence");
+});
+
+runTest("Safety Guard: low-confidence reference blocks MATCHED TO CSV and returns AMBIGUOUS — REVIEW REQUIRED", () => {
+  // Even though reference and amount match CSV row #2 exactly:
+  const match = reconcileScreenshotWithCsv(
+    {
+      reference: "ABC123456789",
+      amount: "499.00",
+      referenceConfidence: "low",
+      amountConfidence: "high",
+    },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.notStrictEqual(match.status, "MATCHED TO CSV", "Must NEVER return MATCHED TO CSV when reference is low confidence");
+  assert.strictEqual(match.status, "AMBIGUOUS — REVIEW REQUIRED");
+  assert.strictEqual(match.statusType, "warning");
+  assert.ok(match.reason.includes("low confidence"), "Reason must mention low confidence");
+});
+
+runTest("Safety Guard: after user review/correction (confidence high), transaction matches to CSV", () => {
+  const match = reconcileScreenshotWithCsv(
+    {
+      reference: "ABC123456789",
+      amount: "499.00",
+      referenceConfidence: "high",
+      amountConfidence: "high",
+    },
+    SAMPLE_CSV_TRANSACTIONS
+  );
+  assert.strictEqual(match.status, "MATCHED TO CSV");
+  assert.strictEqual(match.statusType, "success");
+  assert.strictEqual(match.matchedTransaction?.rowNumber, 2);
+});
+
 console.log(`\n=======================================================`);
 console.log(`ALL ${passed}/${total} REGRESSION TESTS PASSED SUCCESSFULLY!`);
 console.log(`=======================================================\n`);
