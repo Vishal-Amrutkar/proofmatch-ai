@@ -31,40 +31,62 @@ export interface CsvParseResult {
   duplicateReferences: string[];
 }
 
-// Known header aliases per README specification
+// Known header aliases per README and Phase 2 specifications
 const REFERENCE_ALIASES = [
   "transaction_reference",
-  "transactionreference",
+  "transaction reference",
   "reference",
-  "ref",
-  "utr",
-  "upi_ref",
-  "upiref",
+  "reference_id",
+  "reference id",
   "transaction_id",
-  "transactionid",
+  "transaction id",
   "txn_id",
-  "txnid",
+  "txn id",
+  "payment_reference",
+  "payment reference",
+  "payment_ref",
+  "payment ref",
+  "utr",
+  "rrn",
+  "upi_ref",
+  "upi ref",
+  "ref",
 ];
 
 const AMOUNT_ALIASES = [
   "amount",
   "transaction_amount",
-  "transactionamount",
+  "transaction amount",
   "paid_amount",
-  "paidamount",
+  "paid amount",
+  "credit",
+  "credited_amount",
+  "credited amount",
+  "credit_amount",
+  "credit amount",
   "txn_amount",
+  "txn amount",
+  "payment_amount",
+  "payment amount",
 ];
 
 const DATE_ALIASES = [
   "date",
   "transaction_date",
-  "transactiondate",
+  "transaction date",
   "payment_date",
-  "paymentdate",
+  "payment date",
   "txn_date",
+  "txn date",
 ];
 
-const STATUS_ALIASES = ["status", "transaction_status", "payment_status"];
+const STATUS_ALIASES = [
+  "status",
+  "transaction_status",
+  "transaction status",
+  "payment_status",
+  "payment status",
+];
 
 /**
  * Conservative reference normalization:
@@ -80,8 +102,10 @@ export function normalizeReference(ref: string): string {
 }
 
 /**
- * Safely parse amount into integer paise (1 Rupee = 100 paise)
+ * Safely parse amount into integer paise (1 unit = 100 paise)
  * Avoids JavaScript floating point representation issues.
+ * Supports currency symbols (₹, $, €, £), thousands commas, and whitespace.
+ * Returns null if amount is non-numeric or invalid.
  */
 export function parseAmountToPaise(val: string | number): number | null {
   if (val === undefined || val === null) return null;
@@ -115,7 +139,7 @@ export function formatPaise(paise: number): string {
   return `${isNegative ? "-" : ""}${units}.${cents}`;
 }
 
-function normalizeHeaderName(header: string): string {
+export function normalizeHeaderName(header: string): string {
   return header.trim().toLowerCase().replace(/[\s-_]+/g, "_");
 }
 
@@ -137,222 +161,250 @@ function findMatchingHeader(
   return undefined;
 }
 
+async function getCsvText(input: string | File): Promise<string> {
+  if (typeof input === "string") return input;
+  if (typeof input.text === "function") {
+    return await input.text();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string) || "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(input);
+  });
+}
+
 /**
- * Parses and validates CSV content in the browser using Papa Parse.
- * Conforms strictly to README section 6.
+ * Parses and validates CSV string content or File in the browser using Papa Parse.
+ * Conforms strictly to README section 6 and Phase 2 requirements.
  */
-export async function parseTransactionCsv(file: File): Promise<CsvParseResult> {
-  return new Promise((resolve) => {
-    Papa.parse<Record<string, string>>(file, {
-      header: true,
-      skipEmptyLines: "greedy",
-      dynamicTyping: false,
-      complete: (results) => {
-        const errors: string[] = [];
-        const warnings: string[] = [];
+export async function parseTransactionCsvContent(
+  input: string | File
+): Promise<CsvParseResult> {
+  let text = "";
+  try {
+    text = await getCsvText(input);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      isValid: false,
+      errors: [`Failed to read CSV input: ${msg}`],
+      warnings: [],
+      totalRows: 0,
+      transactions: [],
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
 
-        // Check for general parsing errors from Papa Parse
-        if (results.errors && results.errors.length > 0) {
-          const criticalErrors = results.errors.filter(
-            (e) => e.type === "Quotes" || e.code === "UndetectableDelimiter"
-          );
-          if (criticalErrors.length > 0) {
-            resolve({
-              isValid: false,
-              errors: [
-                `Malformed CSV: ${criticalErrors
-                  .map((e) => e.message)
-                  .join(", ")}`,
-              ],
-              warnings: [],
-              totalRows: 0,
-              transactions: [],
-              hasDuplicateReferences: false,
-              duplicateReferences: [],
-            });
-            return;
-          }
-        }
+  // Handle completely empty input
+  if (!text || !text.trim()) {
+    return {
+      isValid: false,
+      errors: [
+        "The uploaded CSV is empty. Please provide a CSV file containing transaction headers and data.",
+      ],
+      warnings: [],
+      totalRows: 0,
+      transactions: [],
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
 
-        const headers = results.meta.fields || [];
-        if (headers.length === 0) {
-          resolve({
-            isValid: false,
-            errors: [
-              "The uploaded CSV is empty or has no header row. Please provide a CSV with column headers.",
-            ],
-            warnings: [],
-            totalRows: 0,
-            transactions: [],
-            hasDuplicateReferences: false,
-            duplicateReferences: [],
-          });
-          return;
-        }
+  const results = Papa.parse<Record<string, string>>(text, {
+    header: true,
+    skipEmptyLines: "greedy",
+    dynamicTyping: false,
+  });
 
-        // Identify required columns
-        const refCol = findMatchingHeader(headers, REFERENCE_ALIASES);
-        const amountCol = findMatchingHeader(headers, AMOUNT_ALIASES);
-        const dateCol = findMatchingHeader(headers, DATE_ALIASES);
-        const statusCol = findMatchingHeader(headers, STATUS_ALIASES);
+  // Check for general parsing errors from Papa Parse
+  if (results.errors && results.errors.length > 0) {
+    const criticalErrors = results.errors.filter(
+      (e) => e.type === "Quotes" || e.code === "UndetectableDelimiter"
+    );
+    if (criticalErrors.length > 0) {
+      return {
+        isValid: false,
+        errors: [
+          `Malformed CSV: ${criticalErrors.map((e) => e.message).join(", ")}`,
+        ],
+        warnings: [],
+        totalRows: 0,
+        transactions: [],
+        hasDuplicateReferences: false,
+        duplicateReferences: [],
+      };
+    }
+  }
 
-        const missingRequired: string[] = [];
-        if (!refCol) {
-          missingRequired.push(
-            "Transaction Reference (expected one of: 'transaction_reference', 'reference', 'utr', 'upi_ref', 'transaction_id', 'ref')"
-          );
-        }
-        if (!amountCol) {
-          missingRequired.push(
-            "Amount (expected one of: 'amount', 'transaction_amount', 'paid_amount')"
-          );
-        }
+  const headers = (results.meta.fields || []).map((h) => h.trim()).filter(Boolean);
+  if (headers.length === 0) {
+    return {
+      isValid: false,
+      errors: [
+        "The uploaded CSV contains no header row. Please provide a CSV with column headers.",
+      ],
+      warnings: [],
+      totalRows: 0,
+      transactions: [],
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
 
-        if (missingRequired.length > 0) {
-          resolve({
-            isValid: false,
-            errors: [
-              `Missing required column(s): ${missingRequired.join("; ")}. Detected columns: [${headers.join(", ")}].`,
-            ],
-            warnings: [],
-            totalRows: 0,
-            transactions: [],
-            hasDuplicateReferences: false,
-            duplicateReferences: [],
-          });
-          return;
-        }
+  // Identify required columns
+  const refCol = findMatchingHeader(headers, REFERENCE_ALIASES);
+  const amountCol = findMatchingHeader(headers, AMOUNT_ALIASES);
+  const dateCol = findMatchingHeader(headers, DATE_ALIASES);
+  const statusCol = findMatchingHeader(headers, STATUS_ALIASES);
 
-        const rawRows = results.data;
-        if (rawRows.length === 0) {
-          resolve({
-            isValid: false,
-            errors: [
-              "The CSV file contains column headers but zero transaction rows.",
-            ],
-            warnings: [],
-            totalRows: 0,
-            transactions: [],
-            detectedColumns: {
-              reference: refCol!,
-              amount: amountCol!,
-              date: dateCol,
-              status: statusCol,
-            },
-            hasDuplicateReferences: false,
-            duplicateReferences: [],
-          });
-          return;
-        }
+  const missingRequired: string[] = [];
+  if (!refCol) {
+    missingRequired.push(
+      "Transaction Reference (e.g. 'reference', 'reference_id', 'transaction_id', 'txn_id', 'transaction reference', 'payment reference', 'utr', 'rrn')"
+    );
+  }
+  if (!amountCol) {
+    missingRequired.push(
+      "Amount (e.g. 'amount', 'transaction_amount', 'paid_amount', 'credit', 'credited amount', 'transaction amount')"
+    );
+  }
 
-        const transactions: ParsedTransaction[] = [];
-        const referenceCounts: Record<string, number> = {};
-        rawRows.forEach((row, idx) => {
-          const rowNumber = idx + 2; // header is row 1
-          const rawRef = (row[refCol!] ?? "").trim();
-          const rawAmt = (row[amountCol!] ?? "").trim();
-          const rawDate = dateCol ? (row[dateCol] ?? "").trim() : undefined;
-          const rawStatus = statusCol ? (row[statusCol] ?? "").trim() : undefined;
+  if (missingRequired.length > 0) {
+    return {
+      isValid: false,
+      errors: [
+        `Missing required column(s): ${missingRequired.join("; ")}. Detected columns: [${headers.join(", ")}].`,
+      ],
+      warnings: [],
+      totalRows: 0,
+      transactions: [],
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
 
-          // Skip completely empty row entries
-          if (!rawRef && !rawAmt) {
-            return;
-          }
-
-          if (!rawRef) {
-            warnings.push(
-              `Row ${rowNumber}: Empty reference value. Row was excluded from reconciliation.`
-            );
-            return;
-          }
-
-          const paise = parseAmountToPaise(rawAmt);
-          if (paise === null) {
-            warnings.push(
-              `Row ${rowNumber}: Invalid amount "${rawAmt}". Row was excluded.`
-            );
-            return;
-          }
-
-          const normalizedRef = normalizeReference(rawRef);
-          referenceCounts[normalizedRef] = (referenceCounts[normalizedRef] || 0) + 1;
-
-          transactions.push({
-            id: `row-${rowNumber}-${normalizedRef}`,
-            rawReference: rawRef,
-            normalizedReference: normalizedRef,
-            rawAmount: rawAmt,
-            amountPaise: paise,
-            formattedAmount: formatPaise(paise),
-            date: rawDate,
-            status: rawStatus,
-            rowNumber,
-            rawRow: row,
-          });
-        });
-
-        if (transactions.length === 0) {
-          resolve({
-            isValid: false,
-            errors: [
-              "No valid transaction rows could be parsed. Check that rows contain non-empty reference IDs and valid numeric amounts.",
-            ],
-            warnings,
-            totalRows: 0,
-            transactions: [],
-            detectedColumns: {
-              reference: refCol!,
-              amount: amountCol!,
-              date: dateCol,
-              status: statusCol,
-            },
-            hasDuplicateReferences: false,
-            duplicateReferences: [],
-          });
-          return;
-        }
-
-        // Identify duplicate references in CSV
-        const duplicateReferences = Object.keys(referenceCounts).filter(
-          (ref) => referenceCounts[ref] > 1
-        );
-        const hasDuplicateReferences = duplicateReferences.length > 0;
-
-        if (hasDuplicateReferences) {
-          warnings.push(
-            `Notice: ${duplicateReferences.length} duplicate reference ID(s) detected in CSV (${duplicateReferences
-              .slice(0, 3)
-              .join(", ")}${duplicateReferences.length > 3 ? "..." : ""}). Deterministic rules will flag duplicates for manual review.`
-          );
-        }
-
-        resolve({
-          isValid: true,
-          errors,
-          warnings,
-          totalRows: transactions.length,
-          transactions,
-          detectedColumns: {
-            reference: refCol!,
-            amount: amountCol!,
-            date: dateCol,
-            status: statusCol,
-          },
-          hasDuplicateReferences,
-          duplicateReferences,
-        });
+  const rawRows = results.data;
+  if (rawRows.length === 0) {
+    return {
+      isValid: false,
+      errors: [
+        "The CSV file contains column headers but zero transaction rows.",
+      ],
+      warnings: [],
+      totalRows: 0,
+      transactions: [],
+      detectedColumns: {
+        reference: refCol!,
+        amount: amountCol!,
+        date: dateCol,
+        status: statusCol,
       },
-      error: (err) => {
-        resolve({
-          isValid: false,
-          errors: [`Failed to read CSV file: ${err.message}`],
-          warnings: [],
-          totalRows: 0,
-          transactions: [],
-          hasDuplicateReferences: false,
-          duplicateReferences: [],
-        });
-      },
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
+
+  const transactions: ParsedTransaction[] = [];
+  const referenceCounts: Record<string, number> = {};
+  const warnings: string[] = [];
+
+  rawRows.forEach((row, idx) => {
+    const rowNumber = idx + 2; // header is row 1
+    const rawRef = (row[refCol!] ?? "").trim();
+    const rawAmt = (row[amountCol!] ?? "").trim();
+    const rawDate = dateCol ? (row[dateCol] ?? "").trim() : undefined;
+    const rawStatus = statusCol ? (row[statusCol] ?? "").trim() : undefined;
+
+    // Skip completely empty row entries
+    if (!rawRef && !rawAmt) {
+      return;
+    }
+
+    if (!rawRef) {
+      warnings.push(
+        `Row ${rowNumber}: Empty reference value. Row was excluded from reconciliation.`
+      );
+      return;
+    }
+
+    const paise = parseAmountToPaise(rawAmt);
+    if (paise === null) {
+      warnings.push(
+        `Row ${rowNumber}: Invalid amount "${rawAmt}". Row was excluded.`
+      );
+      return;
+    }
+
+    const normalizedRef = normalizeReference(rawRef);
+    referenceCounts[normalizedRef] = (referenceCounts[normalizedRef] || 0) + 1;
+
+    transactions.push({
+      id: `row-${rowNumber}-${normalizedRef}`,
+      rawReference: rawRef,
+      normalizedReference: normalizedRef,
+      rawAmount: rawAmt,
+      amountPaise: paise,
+      formattedAmount: formatPaise(paise),
+      date: rawDate,
+      status: rawStatus,
+      rowNumber,
+      rawRow: row,
     });
   });
+
+  if (transactions.length === 0) {
+    return {
+      isValid: false,
+      errors: [
+        "No usable transaction rows found. All rows either lacked a reference ID or contained invalid amounts.",
+      ],
+      warnings,
+      totalRows: 0,
+      transactions: [],
+      detectedColumns: {
+        reference: refCol!,
+        amount: amountCol!,
+        date: dateCol,
+        status: statusCol,
+      },
+      hasDuplicateReferences: false,
+      duplicateReferences: [],
+    };
+  }
+
+  // Identify duplicate references in CSV
+  const duplicateReferences = Object.keys(referenceCounts).filter(
+    (ref) => referenceCounts[ref] > 1
+  );
+  const hasDuplicateReferences = duplicateReferences.length > 0;
+
+  if (hasDuplicateReferences) {
+    warnings.push(
+      `Notice: ${duplicateReferences.length} duplicate reference ID(s) detected in CSV (${duplicateReferences
+        .slice(0, 3)
+        .join(", ")}${duplicateReferences.length > 3 ? "..." : ""}). Deterministic rules will flag duplicates for manual review.`
+    );
+  }
+
+  return {
+    isValid: true,
+    errors: [],
+    warnings,
+    totalRows: transactions.length,
+    transactions,
+    detectedColumns: {
+      reference: refCol!,
+      amount: amountCol!,
+      date: dateCol,
+      status: statusCol,
+    },
+    hasDuplicateReferences,
+    duplicateReferences,
+  };
+}
+
+export async function parseTransactionCsv(file: File): Promise<CsvParseResult> {
+  return parseTransactionCsvContent(file);
 }

@@ -88,6 +88,8 @@ export function CsvUploadCard({
     }
 
     if (onErrorChange) onErrorChange(null);
+    setParsedData(null);
+    if (onParsedResultChange) onParsedResultChange(null);
     onFileSelect(selectedFile);
     processFile(selectedFile);
   };
@@ -318,10 +320,12 @@ export function CsvUploadCard({
             )}
 
             {/* Preview of first few rows */}
-            {activeParsedData && activeParsedData.transactions.length > 0 && (
+            {activeParsedData && activeParsedData.isValid && activeParsedData.transactions.length > 0 && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] text-slate-500 font-medium">
-                  <span>Data Preview (first {Math.min(activeParsedData.transactions.length, 3)} of {activeParsedData.totalRows} rows)</span>
+                  <span>
+                    Data Preview (first {Math.min(activeParsedData.transactions.length, 5)} of {activeParsedData.totalRows} rows)
+                  </span>
                   <span className="text-emerald-700 font-semibold">Ready for Matching</span>
                 </div>
                 <div className="overflow-x-auto rounded border border-slate-200 bg-white text-xs">
@@ -335,7 +339,7 @@ export function CsvUploadCard({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-                      {activeParsedData.transactions.slice(0, 3).map((tx) => (
+                      {activeParsedData.transactions.slice(0, 5).map((tx) => (
                         <tr key={tx.id} className="hover:bg-slate-50/50">
                           <td className="py-1 px-2 text-slate-400">{tx.rowNumber}</td>
                           <td className="py-1 px-2 font-medium text-slate-800 truncate max-w-[130px]">
@@ -352,6 +356,18 @@ export function CsvUploadCard({
                     </tbody>
                   </table>
                 </div>
+              </div>
+            )}
+
+            {/* Validation errors when invalid */}
+            {activeParsedData && !activeParsedData.isValid && activeParsedData.errors.length > 0 && (
+              <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 space-y-1">
+                <p className="font-semibold text-rose-900">CSV Validation Errors:</p>
+                {activeParsedData.errors.map((err, eIdx) => (
+                  <p key={eIdx} className="leading-relaxed">
+                    • {err}
+                  </p>
+                ))}
               </div>
             )}
 
