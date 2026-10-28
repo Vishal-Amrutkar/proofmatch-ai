@@ -23,6 +23,16 @@ export interface OcrJobProgress {
   stage: "init" | "loading-core" | "loading-lang" | "recognizing" | "completed" | "error";
 }
 
+interface AmountCandidate {
+  raw: string;
+  paise: number;
+  formatted: string;
+  line: string;
+  score: number;
+  hasCurrencySymbol: boolean;
+  hasPaymentKeyword: boolean;
+}
+
 const MONTH_MAP: Record<string, string> = {
   jan: "01",
   january: "01",
@@ -48,6 +58,186 @@ const MONTH_MAP: Record<string, string> = {
   dec: "12",
   december: "12",
 };
+
+/**
+ * Extracts all amount candidates with scoring based on currency symbols,
+ * payment keywords, and formatting contexts.
+ * Never strips leading digits from comma-separated amounts.
+ */
+function extractAndScoreAmounts(lines: string[]): {
+  amount: string;
+  amountConfidence: "high" | "low" | "missing";
+  amountPaise: number | null;
+  amountSource?: string;
+} {
+  const candidatesByPaise = new Map<number, AmountCandidate>();
+
+  // Regex to match currency-prefixed amounts (handles ₹, Rs, INR, $, €, £)
+  // [0-9]{1,3}(?:,[0-9]{2,3})* correctly supports Indian (lakhs) and international comma grouping
+  const CURRENCY_PREFIX_REGEX = /(?:[₹$€£]|Rs\.?|INR)\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/gi;
+
+  // Regex to match amounts preceded by payment keywords
+  const LABELED_AMOUNT_REGEX = /(?:total\s*amount|paid\s*amount|amount\s*paid|payment\s*amount|total|paid|amount|sent|transferred|credited|debited)\s*[:₹\s]*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/gi;
+
+  // Regex to match standalone numeric values with lookbehind/lookahead to prevent stripping leading digits
+  const STANDALONE_NUMBER_REGEX = /(?<![\d,])([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)(?![\d,])/g;
+
+  lines.forEach((line) => {
+    const isExplicitFinalTotal = /\b(total\s*paid|amount\s*paid|paid\s*amount|grand\s*total|final\s*amount|net\s*amount)\b/i.test(line);
+    const isGeneralPayment = /\b(total|paid|amount|sent|transferred|credited|debited)\b/i.test(line);
+    const isLineItem = /\b(subtotal|sub-total|fee|tax|gst|charge|conv|delivery|discount|balance)\b/i.test(line);
+
+    // 1. Currency-prefixed matches
+    let match: RegExpExecArray | null;
+    while ((match = CURRENCY_PREFIX_REGEX.exec(line)) !== null) {
+      const rawNum = match[1];
+      const paise = parseAmountToPaise(rawNum);
+      if (paise !== null && paise > 0) {
+        let score = 90;
+        if (isExplicitFinalTotal) score += 40;
+        else if (isGeneralPayment && !isLineItem) score += 25;
+        if (isLineItem) score -= 45;
+        if (line.trim().replace(/[₹$€£,\s]/g, "") === rawNum.replace(/[,\s]/g, "")) {
+          // The line is essentially just the currency amount (dominant header)
+          score += 30;
+        }
+
+        const existing = candidatesByPaise.get(paise);
+        if (!existing || score > existing.score) {
+          candidatesByPaise.set(paise, {
+            raw: rawNum,
+            paise,
+            formatted: formatPaise(paise),
+            line,
+            score,
+            hasCurrencySymbol: true,
+            hasPaymentKeyword: isGeneralPayment,
+          });
+        }
+      }
+    }
+
+    // 2. Keyword-labeled matches
+    while ((match = LABELED_AMOUNT_REGEX.exec(line)) !== null) {
+      const rawNum = match[1];
+      const paise = parseAmountToPaise(rawNum);
+      if (paise !== null && paise > 0) {
+        let score = 80;
+        const hasCurrency = /[₹$€£]|Rs|INR/i.test(line);
+        if (hasCurrency) score += 20;
+        if (isExplicitFinalTotal) score += 30;
+        if (isLineItem) score -= 45;
+
+        const existing = candidatesByPaise.get(paise);
+        if (!existing || score > existing.score) {
+          candidatesByPaise.set(paise, {
+            raw: rawNum,
+            paise,
+            formatted: formatPaise(paise),
+            line,
+            score,
+            hasCurrencySymbol: hasCurrency,
+            hasPaymentKeyword: true,
+          });
+        }
+      }
+    }
+
+    // 3. Standalone number matches (e.g. when OCR drops the ₹ glyph)
+    while ((match = STANDALONE_NUMBER_REGEX.exec(line)) !== null) {
+      const rawNum = match[1];
+      // Skip integers with 10+ digits (likely reference/phone) or 4 digits (likely year)
+      if (!rawNum.includes(".") && (rawNum.length >= 10 || rawNum.length === 4)) {
+        continue;
+      }
+      // Skip numbers adjacent to date slashes or hyphens (e.g. 28/10/2026)
+      const idx = match.index;
+      if (idx > 0 && (line[idx - 1] === "/" || line[idx - 1] === "-")) continue;
+      if (
+        idx + rawNum.length < line.length &&
+        (line[idx + rawNum.length] === "/" || line[idx + rawNum.length] === "-")
+      ) {
+        continue;
+      }
+
+      const paise = parseAmountToPaise(rawNum);
+      if (paise !== null && paise > 0) {
+        // Standalone numbers require a decimal point to qualify as an amount
+        if (rawNum.includes(".")) {
+          let score = 45;
+          if (line.trim() === rawNum) score += 30; // Entire line is the amount
+          if (isExplicitFinalTotal) score += 35;
+          else if (isGeneralPayment && !isLineItem) score += 20;
+          if (isLineItem) score -= 45;
+
+          const existing = candidatesByPaise.get(paise);
+          if (!existing || score > existing.score) {
+            candidatesByPaise.set(paise, {
+              raw: rawNum,
+              paise,
+              formatted: formatPaise(paise),
+              line,
+              score,
+              hasCurrencySymbol: false,
+              hasPaymentKeyword: isGeneralPayment,
+            });
+          }
+        }
+      }
+    }
+  });
+
+  const candidates = Array.from(candidatesByPaise.values()).sort(
+    (a, b) => b.score - a.score
+  );
+
+  if (candidates.length === 0) {
+    return {
+      amount: "",
+      amountConfidence: "missing",
+      amountPaise: null,
+      amountSource: undefined,
+    };
+  }
+
+  const top = candidates[0];
+
+  // Disambiguation: Check if multiple distinct plausible amounts exist
+  const competingCandidates = candidates.filter(
+    (c) => c.paise !== top.paise && c.score >= 60 && Math.abs(top.score - c.score) <= 25
+  );
+
+  if (competingCandidates.length > 0) {
+    // Multiple plausible amounts detected -> mark for manual review!
+    const listStr = candidates
+      .slice(0, 3)
+      .map((c) => `₹${c.formatted}`)
+      .join(", ");
+    return {
+      amount: top.formatted,
+      amountConfidence: "low",
+      amountPaise: top.paise,
+      amountSource: `Multiple candidate amounts detected in screenshot (${listStr}). Please verify and edit if needed.`,
+    };
+  }
+
+  if (top.score >= 75) {
+    return {
+      amount: top.formatted,
+      amountConfidence: "high",
+      amountPaise: top.paise,
+      amountSource: `Matched payment amount ₹${top.formatted} in: "${top.line}"`,
+    };
+  }
+
+  // Moderate score (e.g. standalone number without explicit currency symbol)
+  return {
+    amount: top.formatted,
+    amountConfidence: "low",
+    amountPaise: top.paise,
+    amountSource: `Extracted candidate amount ₹${top.formatted} from: "${top.line}" (Review recommended)`,
+  };
+}
 
 /**
  * Conservative, explainable heuristics for extracting payment candidate fields from OCR text.
@@ -119,64 +309,8 @@ export function extractCandidateFields(rawText: string): ExtractedCandidateField
     }
   }
 
-  // 2. Payment Amount Extraction Heuristics
-  let extractedAmount = "";
-  let amountConfidence: "high" | "low" | "missing" = "missing";
-  let amountPaise: number | null = null;
-  let amountSource: string | undefined = undefined;
-
-  // Pattern A: Currency symbol prefixed amount (₹, Rs., INR, $, €)
-  const currencyAmountRegex = /(?:₹|Rs\.?|INR|\$|€|£)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/i;
-
-  for (const line of lines) {
-    const match = line.match(currencyAmountRegex);
-    if (match && match[1]) {
-      const parsed = parseAmountToPaise(match[1]);
-      if (parsed !== null && parsed > 0) {
-        extractedAmount = formatPaise(parsed);
-        amountPaise = parsed;
-        amountConfidence = "high";
-        amountSource = `Matched currency amount in line: "${line}"`;
-        break;
-      }
-    }
-  }
-
-  // Pattern B: Labeled amount keywords (Paid, Amount, Total, Sent, Transferred)
-  if (!extractedAmount) {
-    const labeledAmountRegex = /(?:Paid|Amount|Total|Sent|Transferred|Payment\s*Amount)\s*[:₹\s]*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/i;
-    for (const line of lines) {
-      const match = line.match(labeledAmountRegex);
-      if (match && match[1]) {
-        const parsed = parseAmountToPaise(match[1]);
-        if (parsed !== null && parsed > 0) {
-          extractedAmount = formatPaise(parsed);
-          amountPaise = parsed;
-          amountConfidence = "high";
-          amountSource = `Matched labeled amount in line: "${line}"`;
-          break;
-        }
-      }
-    }
-  }
-
-  // Pattern C: Decimal number with 2 decimal places if lines mention payment context
-  if (!extractedAmount) {
-    const decimalAmountRegex = /\b([0-9]{1,5}\.[0-9]{2})\b/;
-    for (const line of lines) {
-      const match = line.match(decimalAmountRegex);
-      if (match && match[1]) {
-        const parsed = parseAmountToPaise(match[1]);
-        if (parsed !== null && parsed > 0) {
-          extractedAmount = formatPaise(parsed);
-          amountPaise = parsed;
-          amountConfidence = "low";
-          amountSource = `Found decimal number candidate in line: "${line}" (Review recommended)`;
-          break;
-        }
-      }
-    }
-  }
+  // 2. Payment Amount Extraction (Refined)
+  const amountResult = extractAndScoreAmounts(lines);
 
   // 3. Date Extraction Heuristics
   let extractedDate = "";
@@ -239,10 +373,10 @@ export function extractCandidateFields(rawText: string): ExtractedCandidateField
     reference: extractedRef,
     referenceConfidence: refConfidence,
     referenceSource: refSource,
-    amount: extractedAmount,
-    amountConfidence: amountConfidence,
-    amountPaise: amountPaise,
-    amountSource: amountSource,
+    amount: amountResult.amount,
+    amountConfidence: amountResult.amountConfidence,
+    amountPaise: amountResult.amountPaise,
+    amountSource: amountResult.amountSource,
     date: extractedDate,
     dateConfidence: dateConfidence,
     dateSource: dateSource,
